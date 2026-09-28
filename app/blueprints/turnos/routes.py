@@ -229,7 +229,7 @@ def cancelar_turno(identifier):
         if turno["paciente"]["id_usuario"] and turno["paciente"]["id_usuario"] != user["sub"]:
             return jsonify({"error": "Acceso denegado: no tiene autorización para cancelar un turno ajeno"}), 403
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     schema = CancelarTurnoSchema()
     data_clean = schema.load(data)
 
