@@ -1,5 +1,6 @@
 import sqlite3
 import uuid
+import os
 import threading
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -13,29 +14,37 @@ class DatabaseService:
     _instance = None
     _lock = threading.Lock()
 
-    def __init__(self, db_path=":memory:"):
-        self.db_path = db_path
-        self._local = threading.local()
+    def __init__(self, db_path=None):
+        # Si no se recibe ruta, se usa la variable DB_PATH (útil en producción
+        # para un archivo persistente) y, si no está definida, una BD en memoria.
+        self.db_path = db_path if db_path is not None else os.getenv("DB_PATH") or ":memory:"
+        self._lock_conn = threading.RLock()
+        self._conn = None
         self._init_db()
 
     @classmethod
-    def get_instance(cls, db_path=":memory:"):
+    def get_instance(cls, db_path=None):
         with cls._lock:
             if cls._instance is None:
                 cls._instance = cls(db_path)
             return cls._instance
 
     def _get_connection(self):
-        if not hasattr(self._local, "conn") or self._local.conn is None:
-            self._local.conn = sqlite3.connect(
-                self.db_path,
-                check_same_thread=False,
-                detect_types=sqlite3.PARSE_DECLTYPES
-            )
-            self._local.conn.row_factory = sqlite3.Row
-            # Activar claves foráneas en SQLite
-            self._local.conn.execute("PRAGMA foreign_keys = ON;")
-        return self._local.conn
+        # Conexión única compartida entre hilos. Antes se usaba una conexión por
+        # hilo (threading.local); con SQLite ':memory:' eso creaba una BD vacía
+        # distinta por request ("no such table: usuarios"). check_same_thread=False
+        # permite compartir una sola conexión entre los hilos del servidor.
+        if self._conn is None:
+            with self._lock_conn:
+                if self._conn is None:
+                    self._conn = sqlite3.connect(
+                        self.db_path,
+                        check_same_thread=False,
+                        detect_types=sqlite3.PARSE_DECLTYPES
+                    )
+                    self._conn.row_factory = sqlite3.Row
+                    self._conn.execute("PRAGMA foreign_keys = ON;")
+        return self._conn
 
     def _init_db(self):
         conn = self._get_connection()
