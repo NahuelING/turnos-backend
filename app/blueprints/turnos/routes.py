@@ -67,6 +67,10 @@ def reservar_turno():
         # está en la BD (pacientes.id_usuario).
         if not paciente:
             paciente = db.get_paciente_by_user_id(g.current_user["sub"])
+        # Rescate de fichas huérfanas creadas sin autenticación (id_usuario NULL):
+        # si el correo de la ficha coincide con el email del token, es el mismo paciente.
+        if not paciente and g.current_user.get("email"):
+            paciente = db.get_paciente_by_correo(g.current_user["email"])
 
     if not paciente:
         return jsonify({"error": "No existe un paciente registrado con esos datos. Regístrelo previamente (CU01)."}), 400

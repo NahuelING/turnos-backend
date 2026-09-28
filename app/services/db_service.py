@@ -298,6 +298,17 @@ class DatabaseService:
         row = cursor.fetchone()
         return dict(row) if row else None
 
+    def get_paciente_by_correo(self, correo):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, id_paciente_codigo as idPaciente, id_usuario, nombre, apellido, ci, telefono, correo
+            FROM pacientes
+            WHERE LOWER(correo) = ?;
+        """, (str(correo).strip().lower(),))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
     def create_paciente(self, nombre, apellido, ci, telefono, correo, id_usuario=None):
         conn = self._get_connection()
         cursor = conn.cursor()
