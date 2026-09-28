@@ -59,8 +59,14 @@ def reservar_turno():
         paciente = db.get_paciente_by_ci(data["ci"])
     elif data.get("id_paciente"):
         paciente = db.get_paciente_by_id(data["id_paciente"])
-    elif hasattr(g, "current_user") and g.current_user and g.current_user.get("paciente_id"):
-        paciente = db.get_paciente_by_id(g.current_user["paciente_id"])
+    elif getattr(g, "current_user", None):
+        if g.current_user.get("paciente_id"):
+            paciente = db.get_paciente_by_id(g.current_user["paciente_id"])
+        # Fallback: el claim paciente_id del JWT puede no existir si la ficha se
+        # creó en la misma sesión (registro + reserva inmediata). El vínculo vivo
+        # está en la BD (pacientes.id_usuario).
+        if not paciente:
+            paciente = db.get_paciente_by_user_id(g.current_user["sub"])
 
     if not paciente:
         return jsonify({"error": "No existe un paciente registrado con esos datos. Regístrelo previamente (CU01)."}), 400
