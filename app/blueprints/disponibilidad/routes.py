@@ -56,5 +56,7 @@ def consultar_disponibilidad():
         "id_profesional": args["id_profesional"],
         "fecha": str(args["fecha"]),
         "horarios_disponibles": disponibles,
-        "total_disponibles": len(disponibles)
+        "horarios_ocupados": [h for h in horas_jornada if h not in disponibles],
+        "total_disponibles": len(disponibles),
+        "total_ocupados": len(horas_jornada) - len(disponibles)
     }), 200

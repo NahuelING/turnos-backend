@@ -392,7 +392,7 @@ class DatabaseService:
               AND estado = 'reservado';
         """, (profesional["id"], profesional["idProfesional"], fecha, hora))
         if cursor.fetchone():
-            return None, "Ese horario ya no está disponible. Elige otro."
+            return None, "Este horario ya está reservado (no disponible). Elige otro horario."
 
         turno_id = str(uuid.uuid4())
         short_code = f"TUR-{uuid.uuid4().hex[:5].upper()}"

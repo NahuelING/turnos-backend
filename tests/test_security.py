@@ -183,7 +183,7 @@ def test_prevencion_doble_reserva_mismo_horario(client):
     # Segunda reserva idéntica -> 409 Conflict
     res2 = client.post("/api/v1/turnos", json=payload)
     assert res2.status_code == 409
-    assert "no está disponible" in res2.get_json()["error"]
+    assert "no disponible" in res2.get_json()["error"]
 
 # ==============================================================================
 # 6. CABECERAS DE SEGURIDAD HTTP (OWASP ASVS)
