@@ -13,11 +13,18 @@ class DatabaseService:
     """
     _instance = None
     _lock = threading.Lock()
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     def __init__(self, db_path=None):
-        # Si no se recibe ruta, se usa la variable DB_PATH (útil en producción
-        # para un archivo persistente) y, si no está definida, una BD en memoria.
-        self.db_path = db_path if db_path is not None else os.getenv("DB_PATH") or ":memory:"
+        # Persistencia por defecto en un archivo (turnos.db) para que los datos
+        # sobrevivan a reinicios del servidor. En testing se usa ':memory:' y se
+        # puede forzar otra ruta con la variable DB_PATH.
+        if db_path is None:
+            if os.getenv("FLASK_ENV") == "testing":
+                db_path = ":memory:"
+            else:
+                db_path = os.getenv("DB_PATH") or os.path.join(self.PROJECT_ROOT, "turnos.db")
+        self.db_path = db_path
         self._lock_conn = threading.RLock()
         self._conn = None
         self._init_db()
