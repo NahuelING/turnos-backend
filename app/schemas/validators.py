@@ -15,6 +15,30 @@ def sanitizar_string(valor):
     limpio = valor.strip()
     return limpio
 
+class CrearUsuarioAdminSchema(Schema):
+    """Alta de usuarios por parte de un administrador (roles privilegiados)."""
+    username = fields.String(
+        required=True,
+        validate=validate.Length(min=3, max=40),
+        error_messages={"required": "El nombre de usuario es obligatorio."}
+    )
+    email = fields.Email(
+        required=True,
+        error_messages={"required": "El correo electrónico es obligatorio.", "invalid": "Correo electrónico inválido."}
+    )
+    password = fields.String(
+        required=True,
+        validate=validate.Length(min=8, max=64),
+        error_messages={"required": "La contraseña es obligatoria y debe tener al menos 8 caracteres."}
+    )
+    rol = fields.String(
+        required=True,
+        validate=validate.OneOf(
+            ["paciente", "medico", "recepcionista", "admin"],
+            error="Rol no válido. Roles admitidos: paciente, medico, recepcionista, admin."
+        )
+    )
+
 class RegistroUsuarioSchema(Schema):
     username = fields.String(
         required=True,

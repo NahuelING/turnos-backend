@@ -25,7 +25,11 @@ class Config:
     
     # Rate Limiting por defecto
     RATELIMIT_DEFAULT = "60 per minute"
-    RATELIMIT_STORAGE_URI = "memory://"
+    RATELIMIT_STORAGE_URI = os.getenv("RATELIMIT_STORAGE_URI", "memory://")
+    
+    # Límite específico para login: frena el ataque de fuerza bruta y de
+    # enumeración de credenciales (OWASP API2:2023 - Broken Authentication).
+    RATELIMIT_LOGIN = os.getenv("RATELIMIT_LOGIN", "5 per minute")
     
     # CORS
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
@@ -33,6 +37,7 @@ class Config:
 class DevelopmentConfig(Config):
     DEBUG = True
     TESTING = False
+    RATELIMIT_ENABLED = True
 
 class TestingConfig(Config):
     DEBUG = True
@@ -42,6 +47,9 @@ class TestingConfig(Config):
 class ProductionConfig(Config):
     DEBUG = False
     TESTING = False
+    RATELIMIT_ENABLED = True
+    # En producción no se permite un origen comodín: se exige lista blanca real.
+    CORS_ORIGINS = os.getenv("CORS_ORIGINS", "").split(",")
 
 config_by_name = {
     "development": DevelopmentConfig,
