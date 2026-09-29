@@ -100,9 +100,11 @@ def get_pacientes():
 
     # Si no se pasó CI, listar pacientes (restringido a staff/médicos para evitar data leaks)
     user = getattr(g, "current_user", None)
-    if not user or user.get("role") not in ["admin", "recepcionista", "medico"]:
+    # El personal médico NO accede al padrón general: solo ve los pacientes que
+    # tienen turno con él, a través de su propia agenda.
+    if not user or user.get("role") not in ["admin", "recepcionista"]:
         return jsonify({
-            "error": "Para consultar el padrón general de pacientes debe autenticarse con rol administrativo o médico."
+            "error": "Para consultar el padrón general de pacientes debe autenticarse con rol administrativo o de recepción."
         }), 403
 
     limit = min(int(request.args.get("limit", 50)), 100)
@@ -141,9 +143,17 @@ def get_paciente_by_id(identifier):
 
     # DEFENSA CONTRA BOLA / IDOR (OWASP API1:2023)
     user = g.current_user
+    # El paciente solo puede ver su propia ficha
     if user.get("role") == "paciente":
-        # El paciente solo puede ver su propia ficha
         if paciente["id_usuario"] != user["sub"]:
             return jsonify({"error": "Acceso denegado: no puede acceder al expediente de otro paciente"}), 403
 
+    # El personal médico no consulta fichas por identificador: accede únicamente a
+    # los datos de sus propios pacientes a través de su agenda.
+    if user.get("role") == "medico":
+        return jsonify({
+            "error": "Acceso denegado: consulte la agenda de sus pacientes."
+        }), 403
+
     return jsonify({"paciente": paciente}), 200
+

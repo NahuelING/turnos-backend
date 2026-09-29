@@ -4,6 +4,12 @@ import os
 import threading
 from werkzeug.security import generate_password_hash, check_password_hash
 
+# Estados que OCUPAN la agenda. Un turno 'atendido' sigue bloqueando su franja
+# horaria y el día del paciente: solo 'cancelado' los libera. El paciente que ya
+# fue atendido puede pedir ese mismo horario, pero en otra fecha.
+ESTADOS_OCUPAN = ("reservado", "atendido")
+_SQL_OCUPAN = "estado IN ('reservado', 'atendido')"
+
 class DatabaseService:
     """
     Servicio de Base de Datos y Repositorio Relacional.
@@ -125,15 +131,74 @@ class DatabaseService:
             );
         """)
 
-        # Índice para evitar turnos duplicados en el mismo profesional, fecha y hora
-        cursor.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_turno_profesional_fecha_hora
-            ON turnos (id_profesional, fecha, hora)
-            WHERE estado = 'reservado';
-        """)
+        # Índices únicos PARCIALES sobre los estados que ocupan la agenda. Se recrean
+        # si la base los tiene con un predicado anterior (p. ej. una BD creada antes
+        # de que existiera el estado 'atendido').
+        self._asegurar_indices_activos(conn, cursor)
 
         conn.commit()
         self._seed_initial_data(conn)
+
+    def _asegurar_indices_activos(self, conn, cursor):
+        """Deja ambos índices con el predicado de los estados que ocupan la agenda."""
+        self._asegurar_indice(
+            conn, cursor,
+            nombre="uq_turno_profesional_fecha_hora",
+            crear=f"""
+                CREATE UNIQUE INDEX uq_turno_profesional_fecha_hora
+                ON turnos (id_profesional, fecha, hora)
+                WHERE {_SQL_OCUPAN};
+            """,
+            violados=f"""
+                SELECT id_profesional, fecha, hora, COUNT(*) AS total
+                FROM turnos WHERE {_SQL_OCUPAN}
+                GROUP BY id_profesional, fecha, hora HAVING COUNT(*) > 1;
+            """,
+            aviso="horarios duplicados en la misma agenda",
+        )
+        self._asegurar_indice(
+            conn, cursor,
+            nombre="uq_turno_paciente_fecha",
+            crear=f"""
+                CREATE UNIQUE INDEX uq_turno_paciente_fecha
+                ON turnos (id_paciente, fecha)
+                WHERE {_SQL_OCUPAN};
+            """,
+            violados=f"""
+                SELECT p.ci AS ci, t.fecha AS fecha, COUNT(*) AS total
+                FROM turnos t JOIN pacientes p ON p.id = t.id_paciente
+                WHERE {_SQL_OCUPAN.replace('estado', 't.estado')}
+                GROUP BY t.id_paciente, t.fecha HAVING COUNT(*) > 1;
+            """,
+            aviso="un turno por dia",
+        )
+
+    def _asegurar_indice(self, conn, cursor, nombre, crear, violados, aviso):
+        """
+        Crea un índice único parcial. Solo reemplaza al existente si los datos lo
+        permiten: si hay filas que violarían el predicado, avisa y conserva el
+        índice anterior en lugar de romper el arranque. La validación de create_turno
+        sigue impidiendo duplicados nuevos mientras tanto.
+        """
+        cursor.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name = ?;", (nombre,))
+        existente = cursor.fetchone()
+        if existente and _SQL_OCUPAN in existente["sql"]:
+            return  # ya está con el predicado correcto
+
+        cursor.execute(violados)
+        conflictos = cursor.fetchall()
+        if conflictos:
+            print(f"[AVISO] No se pudo activar la protección '{aviso}'.")
+            print(f"[AVISO] Datos existentes en conflicto (la API sigue validando en el momento):")
+            for fila in conflictos:
+                detalle = fila["ci"] if "ci" in fila.keys() else fila["hora"]
+                print(f"[AVISO]   - {detalle}: {dict(fila)}")
+            return
+
+
+        cursor.execute(f"DROP INDEX IF EXISTS {nombre};")
+        cursor.execute(crear)
+        conn.commit()
 
     def _seed_initial_data(self, conn):
         cursor = conn.cursor()
@@ -166,19 +231,33 @@ class DatabaseService:
         u_admin_id = "a0000000-0000-0000-0000-000000000001"
         u_medico_id = "a0000000-0000-0000-0000-000000000002"
         u_paciente_id = "a0000000-0000-0000-0000-000000000003"
+        u_medico_2_id = "a0000000-0000-0000-0000-000000000004"
+        u_medico_3_id = "a0000000-0000-0000-0000-000000000005"
 
         usuarios_data = [
             (u_admin_id, "admin_salud", "admin@saludperiurbano.gob.bo", pw_admin, 1),
             (u_medico_id, "dra_rojas", "marcela.rojas@saludperiurbano.gob.bo", pw_medico, 3),
             (u_paciente_id, "juan_paciente", "juan.perez@correo.bo", pw_paciente, 4),
+            (u_medico_2_id, "dr_fernandez", "diego.fernandez@saludperiurbano.gob.bo", pw_medico, 3),
+            (u_medico_3_id, "dra_quispe", "ana.quispe@saludperiurbano.gob.bo", pw_medico, 3),
         ]
         cursor.executemany("""
             INSERT OR IGNORE INTO usuarios (id, username, email, password_hash, id_rol)
             VALUES (?, ?, ?, ?, ?);
         """, usuarios_data)
 
-        # Asociar médica Marcela Rojas con su usuario
-        cursor.execute("UPDATE profesionales SET id_usuario = ? WHERE id_profesional_codigo = 'PRF-001';", (u_medico_id,))
+        # Vincular cada profesional médico con su usuario para que pueda iniciar
+        # sesión y ver únicamente su propia agenda.
+        medicos = {
+            "PRF-001": u_medico_id,
+            "PRF-002": u_medico_2_id,
+            "PRF-003": u_medico_3_id,
+        }
+        for codigo, usuario_id in medicos.items():
+            cursor.execute(
+                "UPDATE profesionales SET id_usuario = ? WHERE id_profesional_codigo = ?;",
+                (usuario_id, codigo)
+            )
 
         # Paciente de prueba
         p_id = str(uuid.uuid4())
@@ -259,6 +338,18 @@ class DatabaseService:
             FROM profesionales
             WHERE (id = ? OR id_profesional_codigo = ?) AND activo = 1;
         """, (identifier, identifier))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_profesional_by_user_id(self, user_id):
+        """Resuelve el profesional a partir del 'sub' del JWT (usuarios.id)."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, id_profesional_codigo as idProfesional, id_usuario, nombre, apellido, especialidad, telefono
+            FROM profesionales
+            WHERE id_usuario = ? AND activo = 1;
+        """, (str(user_id),))
         row = cursor.fetchone()
         return dict(row) if row else None
 
@@ -351,12 +442,12 @@ class DatabaseService:
 
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT hora
             FROM turnos
             WHERE (id_profesional = ? OR id_profesional = ?)
               AND fecha = ?
-              AND estado = 'reservado';
+              AND {_SQL_OCUPAN};
         """, (profesional["id"], profesional["idProfesional"], fecha))
         ocupadas = {row["hora"] for row in cursor.fetchall()}
         disponibles = [h for h in horas_jornada if h not in ocupadas]
@@ -383,16 +474,38 @@ class DatabaseService:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        # Comprobar disponibilidad con bloqueo atómico
-        cursor.execute("""
-            SELECT id FROM turnos 
+        # Comprobar disponibilidad con bloqueo atómico. Un turno 'atendido' sigue
+        # ocupando la franja: solo 'cancelado' la libera.
+        cursor.execute(f"""
+            SELECT id FROM turnos
             WHERE (id_profesional = ? OR id_profesional = ?)
-              AND fecha = ? 
-              AND hora = ? 
-              AND estado = 'reservado';
+              AND fecha = ?
+              AND hora = ?
+              AND {_SQL_OCUPAN};
         """, (profesional["id"], profesional["idProfesional"], fecha, hora))
         if cursor.fetchone():
             return None, "Este horario ya está reservado (no disponible). Elige otro horario."
+
+        # Regla de negocio: un paciente no puede tener dos turnos activos el mismo
+        # día, sin importar el horario ni el profesional. Los estados 'atendido' y
+        # 'cancelado' no cuentan. Cancelar o deshacer la atención libera el día.
+        cursor.execute(f"""
+            SELECT hora, estado FROM turnos
+            WHERE id_paciente = ?
+              AND fecha = ?
+              AND {_SQL_OCUPAN}
+            LIMIT 1;
+        """, (paciente["id"], fecha))
+        turno_del_dia = cursor.fetchone()
+        if turno_del_dia:
+            # El estado importa: un turno 'atendido' también bloquea el día y el
+            # mensaje debe decirlo, o el paciente cree que puede reintentar.
+            estado_texto = "atendido" if turno_del_dia["estado"] == "atendido" else "reservado"
+            return None, (
+                f"Ya tenes un turno {estado_texto} el {fecha} a las "
+                f"{turno_del_dia['hora']}. "
+                "Solo se permite un turno por dia: elige otra fecha o cancela ese turno."
+            )
 
         turno_id = str(uuid.uuid4())
         short_code = f"TUR-{uuid.uuid4().hex[:5].upper()}"
@@ -404,7 +517,15 @@ class DatabaseService:
             """, (turno_id, short_code, paciente["id"], profesional["id"], fecha, hora))
             conn.commit()
             return self.get_turno_by_id(turno_id), None
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as e:
+            conn.rollback()
+            # El índice uq_turno_paciente_fecha solo puede dispararse por una carrera
+            # entre dos reservas concurrentes del mismo paciente y día.
+            if "uq_turno_paciente_fecha" in str(e) or "turnos.id_paciente" in str(e):
+                return None, (
+                    f"Ya tenes un turno reservado el {fecha}. "
+                    "Solo se permite un turno por dia: elige otra fecha o cancela ese turno."
+                )
             return None, "Ese horario ya fue reservado concurrentemente. Por favor elige otro."
 
     def get_turno_by_id(self, turno_id):
@@ -469,6 +590,34 @@ class DatabaseService:
             SET estado = 'cancelado', motivo_cancelacion = ?
             WHERE id = ? OR id_turno_codigo = ?;
         """, (motivo, turno["id"], turno["idTurno"]))
+        conn.commit()
+        return self.get_turno_by_id(turno["id"]), None
+
+    def marcar_atencion(self, turno_id, atendido=True):
+        """
+        Marca un turno como 'atendido' o lo devuelve a 'reservado' (deshacer).
+
+        El turno sigue ocupando la franja horaria y el día del paciente: la atención
+        no libera la agenda, solo queda registrado que la consulta ya se realizó.
+        """
+        turno = self.get_turno_by_id(turno_id)
+        if not turno:
+            return None, "No se encontró ningún turno con ese identificador."
+        if turno["estado"] == "cancelado":
+            return None, "No se puede registrar la atención de un turno cancelado."
+
+        nuevo_estado = "atendido" if atendido else "reservado"
+        if turno["estado"] == nuevo_estado:
+            mensaje = "El turno ya figuraba como atendido." if atendido else "El turno ya estaba reservado."
+            return turno, mensaje
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE turnos
+            SET estado = ?, motivo_cancelacion = NULL
+            WHERE id = ? OR id_turno_codigo = ?;
+        """, (nuevo_estado, turno["id"], turno["idTurno"]))
         conn.commit()
         return self.get_turno_by_id(turno["id"]), None
 
